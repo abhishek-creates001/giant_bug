@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#161814">
+  <title>Giant Worm — Chase the Fly!</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      display: grid;
+      place-items: center;
+      background: #161814;
+      color: #f5dab8;
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      touch-action: none;
+      cursor: none;
+    }
+    canvas.game-over { cursor: default; }
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" aria-label="Giant Worm game. Move your pointer or finger to guide the fly."></canvas>
+  <p class="sr-only">Move your mouse or finger to guide the fly. If the worm grows to its maximum size, press R or Enter to restart.</p>
+  <script>
+    (() => {
+      "use strict";
+
+      const W = 1200;
+      const H = 800;
+      const RADII = [25, 30, 33, 34, 34, 32, 29, 25, 20, 14, 8];
+      const SPACING = [0, 24, 25, 25, 25, 24, 23, 22, 20, 18, 15];
+      const MAX_SPEED = 480;
+      const SIZE_PER_FLY = 0.25;
+      const MAX_SIZE = 3;
+      const COLORS = {
+        bg: "#161814",
+        bodyDark: "#492a1c",
+        bodyMid: "#94522f",
+        bodyLight: "#cd844d",
+        bodyBand: "#673623",
+        eye: "#1c1412",
+        flyBody: "#262b24",
+        flyWing: "rgba(175, 205, 194, 0.61)",
+        flyEye: "#9b2323"
+      };
+
+      const canvas = document.querySelector("#game");
+      const ctx = canvas.getContext("2d");
+      const restartButton = { x: W / 2 - 90, y: H / 2 + 85, w: 180, h: 58 };
+      const pointer = { x: W * 0.75, y: H / 2 };
+      let scale = 1;
+      let offsetX = 0;
+      let offsetY = 0;
+      let bug;
+      let time = 0;
+      let previousFrame = 0;
+      let canEat = true;
+      let gameOver = false;
+
+      const vec = (x, y) => ({ x, y });
+      const add = (a, b) => vec(a.x + b.x, a.y + b.y);
+      const sub = (a, b) => vec(a.x - b.x, a.y - b.y);
+      const mul = (a, n) => vec(a.x * n, a.y * n);
+      const length = v => Math.hypot(v.x, v.y);
+      const normalize = (v, fallback = vec(1, 0)) => {
+        const n = length(v);
+        return n <= 1e-6 ? { ...fallback } : mul(v, 1 / n);
+      };
+      const perp = v => vec(-v.y, v.x);
+
+      function resize() {
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        canvas.width = Math.round(window.innerWidth * dpr);
+        canvas.height = Math.round(window.innerHeight * dpr);
+        scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+        offsetX = (window.innerWidth - W * scale) / 2;
+        offsetY = (window.innerHeight - H * scale) / 2;
+      }
+
+      function makeBug() {
+        const segments = RADII.map((_, i) => {
+          const distance = SPACING.slice(0, i + 1).reduce((sum, n) => sum + n, 0);
+          return vec(W / 2 - distance, H / 2);
+        });
+        return { segments, velocity: vec(0, 0), size: 1 };
+      }
+
+      function axis(i) {
+        const segments = bug.segments;
+        if (i === 0) return normalize(sub(segments[0], segments[1]));
+        const j = Math.min(i + 1, segments.length - 1);
+        return normalize(sub(segments[i - 1], segments[j]));
+      }
+
+      function updateBug(target, dt) {
+        const head = bug.segments[0];
+        const toTarget = sub(target, head);
+        const distance = length(toTarget);
+        const desired = distance > 45
+          ? mul(normalize(toTarget), Math.min((distance - 45) * 4, MAX_SPEED))
+          : vec(0, 0);
+        const blend = 1 - Math.exp(-7 * dt);
+        bug.velocity = add(bug.velocity, mul(sub(desired, bug.velocity), blend));
+        bug.segments[0] = add(head, mul(bug.velocity, dt));
+
+        for (let i = 1; i < bug.segments.length; i++) {
+          const delta = sub(bug.segments[i - 1], bug.segments[i]);
+          bug.segments[i] = sub(
+            bug.segments[i - 1],
+            mul(normalize(delta), SPACING[i] * bug.size)
+          );
+        }
+      }
+
+      function circle(position, radius, color) {
+        ctx.beginPath();
+        ctx.arc(position.x, position.y, radius, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+
+      function drawBug() {
+        const segments = bug.segments;
+        ctx.save();
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
+        ctx.shadowBlur = 0;
+        ctx.shadowOffsetX = 10;
+        ctx.shadowOffsetY = 15;
+        for (let i = 0; i < segments.length - 1; i++) {
+          ctx.strokeStyle = "rgba(0, 0, 0, 0.25)";
+          ctx.lineWidth = (RADII[i] + RADII[i + 1]) * 1.8 * bug.size;
+          ctx.beginPath();
+          ctx.moveTo(segments[i].x, segments[i].y);
+          ctx.lineTo(segments[i + 1].x, segments[i + 1].y);
+          ctx.stroke();
+        }
+        for (let i = 0; i < segments.length; i++) {
+          circle(segments[i], (RADII[i] + 3) * bug.size, "rgba(0, 0, 0, 0.24)");
+        }
+        ctx.restore();
+
+        for (let i = segments.length - 1; i > 0; i--) {
+          const a = segments[i];
+          const b = segments[i - 1];
+          const width = (RADII[i] + RADII[i - 1]) * 0.92 * bug.size;
+          ctx.lineCap = "round";
+          ctx.strokeStyle = COLORS.bodyDark;
+          ctx.lineWidth = width;
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+          ctx.strokeStyle = COLORS.bodyMid;
+          ctx.lineWidth = Math.max(1, width - 8 * bug.size);
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y - 3);
+          ctx.lineTo(b.x, b.y - 3);
+          ctx.stroke();
+        }
+
+        for (let i = segments.length - 1; i >= 0; i--) {
+          const pulse = Math.sin(time * 4 - i * 0.45) * 1.5;
+          const position = segments[i];
+          const radius = (RADII[i] + pulse) * bug.size;
+          circle(position, radius, COLORS.bodyDark);
+          circle(vec(position.x, position.y - 3), radius * 0.84, COLORS.bodyMid);
+          ctx.fillStyle = COLORS.bodyLight;
+          ctx.beginPath();
+          ctx.ellipse(
+            position.x,
+            position.y - 0.08 * radius,
+            radius * 0.5,
+            radius * 0.24,
+            0,
+            0,
+            Math.PI * 2
+          );
+          ctx.fill();
+          if (i >= 2 && i <= 8) {
+            const normal = perp(axis(i));
+            ctx.strokeStyle = COLORS.bodyBand;
+            ctx.lineWidth = Math.max(2, 3 * bug.size);
+            ctx.beginPath();
+            ctx.moveTo(position.x - normal.x * radius * 0.72, position.y - normal.y * radius * 0.72);
+            ctx.lineTo(position.x + normal.x * radius * 0.72, position.y + normal.y * radius * 0.72);
+            ctx.stroke();
+          }
+        }
+
+        const head = segments[0];
+        const heading = axis(0);
+        const normal = perp(heading);
+        for (const side of [-1, 1]) {
+          const eye = add(add(head, mul(heading, 5 * bug.size)), mul(normal, side * 14 * bug.size));
+          circle(eye, Math.max(2, 5 * bug.size), "#ebbe91");
+          circle(add(eye, mul(heading, 1.5 * bug.size)), Math.max(1, 2 * bug.size), COLORS.eye);
+        }
+        const mouth = add(head, mul(heading, 19 * bug.size));
+        ctx.strokeStyle = COLORS.bodyDark;
+        ctx.lineWidth = Math.max(1, 2 * bug.size);
+        ctx.beginPath();
+        ctx.moveTo(mouth.x - normal.x * 5 * bug.size, mouth.y - normal.y * 5 * bug.size);
+        ctx.lineTo(mouth.x + normal.x * 5 * bug.size, mouth.y + normal.y * 5 * bug.size);
+        ctx.stroke();
+      }
+
+      function drawFly(position) {
+        const heading = vec(Math.cos(time * 2.2), Math.sin(time * 2.2));
+        const side = perp(heading);
+        const wingbeat = Math.sin(time * 38) * 0.32;
+        for (const sign of [-1, 1]) {
+          const center = add(
+            sub(position, mul(heading, 2)),
+            mul(side, sign * (8 + wingbeat * sign))
+          );
+          const angle = Math.atan2(side.y * sign - wingbeat, side.x * sign + wingbeat);
+          ctx.save();
+          ctx.translate(center.x, center.y);
+          ctx.rotate(angle);
+          ctx.fillStyle = COLORS.flyWing;
+          ctx.beginPath();
+          ctx.ellipse(0, 0, 15, 8, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+        const thorax = add(position, mul(heading, 1));
+        const abdomen = sub(position, mul(heading, 9));
+        ctx.strokeStyle = COLORS.flyBody;
+        ctx.lineWidth = 5;
+        ctx.beginPath();
+        ctx.moveTo(thorax.x, thorax.y);
+        ctx.lineTo(abdomen.x, abdomen.y);
+        ctx.stroke();
+        circle(thorax, 5, COLORS.flyBody);
+        circle(abdomen, 4, "#373c30");
+        const head = add(position, mul(heading, 8));
+        circle(add(head, mul(side, 3)), 3, COLORS.flyEye);
+        circle(sub(head, mul(side, 3)), 3, COLORS.flyEye);
+        ctx.strokeStyle = COLORS.flyBody;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(head.x + heading.x * 3, head.y + heading.y * 3);
+        ctx.lineTo(head.x + heading.x * 10, head.y + heading.y * 10);
+        ctx.stroke();
+      }
+
+      function drawButton(button, label, mouse) {
+        const hovered = mouse.x >= button.x && mouse.x <= button.x + button.w
+          && mouse.y >= button.y && mouse.y <= button.y + button.h;
+        ctx.fillStyle = hovered ? "#755236" : "#533e2d";
+        ctx.beginPath();
+        ctx.roundRect(button.x, button.y, button.w, button.h, 8);
+        ctx.fill();
+        ctx.strokeStyle = "#dcb991";
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = "#f5e1c8";
+        ctx.font = "28px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, button.x + button.w / 2, button.y + button.h / 2);
+      }
+
+      function drawGameOver(mouse) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.69)";
+        ctx.fillRect(0, 0, W, H);
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#f5dab8";
+        ctx.font = "bold 72px system-ui, sans-serif";
+        ctx.fillText("GAME OVER", W / 2, H / 2 - 30);
+        ctx.fillStyle = "#dcc3a0";
+        ctx.font = "26px system-ui, sans-serif";
+        ctx.fillText("The worm reached its maximum size!", W / 2, H / 2 + 32);
+        drawButton(restartButton, "Restart", mouse);
+        ctx.fillStyle = "#dcc3a0";
+        ctx.font = "18px system-ui, sans-serif";
+        ctx.fillText("Press R or Enter to restart, or close this tab to quit", W / 2, H / 2 + 180);
+      }
+
+      function drawInstructions() {
+        ctx.fillStyle = "rgba(245, 218, 184, 0.8)";
+        ctx.font = "18px system-ui, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillText("Move your mouse or finger to guide the fly. Don't let the worm catch you!", W / 2, 22);
+      }
+
+      function pointerPosition(event) {
+        const rect = canvas.getBoundingClientRect();
+        return vec(
+          Math.max(0, Math.min(W, (event.clientX - rect.left - offsetX) / scale)),
+          Math.max(0, Math.min(H, (event.clientY - rect.top - offsetY) / scale))
+        );
+      }
+
+      function restart() {
+        bug = makeBug();
+        canEat = true;
+        gameOver = false;
+        canvas.classList.remove("game-over");
+      }
+
+      function inside(point, button) {
+        return point.x >= button.x && point.x <= button.x + button.w
+          && point.y >= button.y && point.y <= button.y + button.h;
+      }
+
+      function frame(timestamp) {
+        const dt = previousFrame ? Math.min((timestamp - previousFrame) / 1000, 0.05) : 0;
+        previousFrame = timestamp;
+        time += dt;
+
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = COLORS.bg;
+        ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+        ctx.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offsetX, dpr * offsetY);
+        ctx.fillStyle = COLORS.bg;
+        ctx.fillRect(0, 0, W, H);
+
+        if (!gameOver) {
+          updateBug(pointer, dt);
+          const distance = length(sub(pointer, bug.segments[0]));
+          const biteDistance = RADII[0] * bug.size + 10;
+          if (!canEat && distance > biteDistance + 55) {
+            canEat = true;
+          } else if (canEat && distance < biteDistance) {
+            canEat = false;
+            bug.size = Math.min(Math.round((bug.size + SIZE_PER_FLY) * 1e10) / 1e10, MAX_SIZE);
+            gameOver = bug.size >= MAX_SIZE;
+          }
+        }
+
+        drawBug();
+        if (gameOver) {
+          canvas.classList.add("game-over");
+          drawGameOver(pointer);
+        } else {
+          canvas.classList.remove("game-over");
+          drawInstructions();
+          drawFly(pointer);
+        }
+        window.requestAnimationFrame(frame);
+      }
+
+      window.addEventListener("resize", resize);
+      canvas.addEventListener("pointermove", event => {
+        const point = pointerPosition(event);
+        pointer.x = point.x;
+        pointer.y = point.y;
+      });
+      canvas.addEventListener("pointerdown", event => {
+        const point = pointerPosition(event);
+        pointer.x = point.x;
+        pointer.y = point.y;
+        if (gameOver && inside(point, restartButton)) restart();
+      });
+      window.addEventListener("keydown", event => {
+        if (gameOver && (event.key.toLowerCase() === "r" || event.key === "Enter")) restart();
+      });
+
+      resize();
+      bug = makeBug();
+      window.requestAnimationFrame(frame);
+    })();
+  </script>
+</body>
+</html>
